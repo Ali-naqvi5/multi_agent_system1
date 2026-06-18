@@ -1,5 +1,5 @@
 # Past Paper Pipeline
-A multi-agent LangGraph + LangChain system that searches, pairs, downloads, and vision-extracts UK past exam papers (Question Papers + Mark Schemes) across major exam boards (AQA, OCR, Edexcel, CIE, WJEC) for GCSE, A-Level, and AS-Level.
+A multi-agent LangGraph + LangChain system that searches, pairs, downloads, and extracts UK past exam papers (Question Papers + Mark Schemes) across major exam boards (AQA, OCR, Edexcel, CIE, WJEC) for GCSE, A-Level, and AS-Level.
 
 ## Architecture
 User Query
