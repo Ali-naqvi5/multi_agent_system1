@@ -22,6 +22,7 @@ _llm = ChatGoogleGenerativeAI(model=LLM_MODEL_FAST, temperature=LLM_TEMPERATURE)
 
 @tool
 def extract_entities(user_query: str) -> str:
+    """Extracts board, level, subject, and year from a user query."""
     
     prompt = f"""You are an exam-paper metadata extractor.
 Extract the following four fields from the user query below.
@@ -65,7 +66,18 @@ JSON:"""
 
 @tool
 def build_search_queries(board: str, level: str, subject: str, year: str) -> str:
-    
+    """
+    Constructs Google-style PDF search queries for both QP and MS from exam metadata.
+
+    Args:
+        board:   Exam board (e.g. "Edexcel", "AQA", "Cambridge").
+        level:   Qualification level (e.g. "A Level", "GCSE").
+        subject: Subject name (e.g. "Physics", "Mathematics").
+        year:    Exam year (e.g. "2023") — empty string if unknown.
+
+    Returns JSON string:
+        {"qp_query": str, "ms_query": str}
+    """
     # Build a clean base: board + level + subject + year (omit blanks)
     parts = [p for p in [board, level, subject, year] if p]
     base = " ".join(parts)
@@ -82,7 +94,17 @@ def build_search_queries(board: str, level: str, subject: str, year: str) -> str
 
 @tool
 def serper_search(query: str, page: int = 1) -> str:
-    
+    """
+    Executes a Google search via SerpAPI and returns organic results as a tagged list.
+
+    Args:
+        query: The search query string (e.g. 'Edexcel A Level Physics 2023 "question paper" filetype:pdf').
+        page:  1-based page number for paginated results. Defaults to 1.
+
+    Returns JSON string:
+        [{"title": str, "url": str, "snippet": str}, ...]
+        On error: {"error": str, "results": []}
+    """
     from serpapi import GoogleSearch
 
     # agent1_tools.py — in serper_search tool
@@ -117,8 +139,22 @@ def serper_search(query: str, page: int = 1) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @tool
+
+
+
 def perplexity_search(query: str, page: int = 1) -> str:
-    
+    """
+    Searches for past exam paper PDF links using the Perplexity online LLM API.
+    Falls back to empty list if PERPLEXITY_API_KEY is not set or response cannot be parsed.
+
+    Args:
+        query: The search query string describing the exam paper to find.
+        page:  Pagination hint passed to the query (not natively supported by Perplexity).
+
+    Returns JSON string:
+        [{"title": str, "url": str}, ...]
+        On error: {"error": str, "results": []}
+    """
     api_key = os.getenv("PERPLEXITY_API_KEY")
     if not api_key:
         return json.dumps({"error": "PERPLEXITY_API_KEY not set", "results": []})
@@ -174,7 +210,19 @@ def perplexity_search(query: str, page: int = 1) -> str:
 
 @tool
 def gemini_search(query: str, page: int = 1) -> str:
-    
+    """
+    Prompts the Gemini LLM to surface past exam paper URLs matching the query.
+    Used as a fallback search engine when SerpAPI and Perplexity are unavailable.
+    Results depend on Gemini's training knowledge — no live web access.
+
+    Args:
+        query: The search query string describing the exam paper to find.
+        page:  Unused — included for interface parity with serper_search and perplexity_search.
+
+    Returns JSON string:
+        [{"title": str, "url": str, "snippet": str}, ...]
+        On error: {"error": str, "results": []}
+    """
     prompt = f"""Search the web for past exam papers matching: {query}
 
 Return results as a JSON array with this structure:
