@@ -10,31 +10,34 @@ from typing_extensions import TypedDict
 
 class AgentState(TypedDict, total=False):
     # ── User input ────────────────────────────────────────────────────────────
-    user_query: str                  
+    qp_url: str
+    ms_url: str
+    qp_metadata_raw: str
+    ms_metadata_raw: str
 
-    # ── Search tool selection ─────────────────────────────────────────────────
-    search_tool: str                 
-
-    # ── Agent 1 outputs ───────────────────────────────────────────────────────
+    # ── Parsed metadata ───────────────────────────────────────────────────────
     board: str
     level: str
     subject: str
     year: str
-    qp_query: str                    
-    ms_query: str                    
-    tagged_results_json: str         # JSON list of {title, url, tag}
+    paper_code: str          # e.g. "1H", "2F"
+    paper_number: str        # numeric part only, e.g. "1", "2"
+    tier: str                # "Foundation" | "Higher" | ""
 
-    # ── Agent 2 outputs ───────────────────────────────────────────────────────
-    pairs_json: str                  # JSON list of {qp_title, qp_url, ms_title, ms_url}
+    # ── Agent 3 inputs ────────────────────────────────────────────────────────
+    pairs_json: str          # JSON list of {qp_title, qp_url, ms_title, ms_url}
 
-    # ── Human interrupts ──────────────────────────────────────────────────────
-    include_images: Optional[bool]   
+    # ── Processing options ────────────────────────────────────────────────────
+    include_images: Optional[bool]
 
     # ── Agent 3 outputs ───────────────────────────────────────────────────────
-    extracted_rows_json: str         
-    diagram_map_json: str            
+    extracted_rows_json: str
+    diagram_map_json: str
 
     # ── Control flow ──────────────────────────────────────────────────────────
-    error_message: Optional[str]     
-    retry_count: int #ss                 
-    status: str                      
+    error_message: Optional[str]
+    retry_count: int
+    status: str
+
+    # ── DB output ─────────────────────────────────────────────────────────────
+    paper_id: Optional[int]     # set by node_save_to_db after commit

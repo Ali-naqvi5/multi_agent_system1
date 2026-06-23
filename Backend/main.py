@@ -1,45 +1,34 @@
-import uuid
+import asyncio
+import os
+
+from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from db.models import Base
 from graph.orchestrator import run_pipeline
+
+load_dotenv()
+
+
+async def _ensure_tables() -> None:
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        print("  DATABASE_URL not set — skipping table setup.")
+        return
+    engine = create_async_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    await engine.dispose()
+
 
 def main():
     print("\n" + "="*60)
-    print("  PAST PAPER RETRIEVAL SYSTEM")
+    print("  PAST PAPER EXTRACTION SYSTEM")
     print("="*60 + "\n")
 
-    user_query = input("  What papers would you like to find? ").strip()
-    thread_id = str(uuid.uuid4())[:8]
-    run_pipeline(user_query=user_query, thread_id=thread_id)
+    asyncio.run(_ensure_tables())
+    run_pipeline()
+
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

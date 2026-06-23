@@ -11,10 +11,6 @@ load_dotenv()
 # ── API keys ────────────────────────────────────────────────────────────────
 OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
 
-# ── Google ───────────────────────────────────────────────────────────────────
-GOOGLE_SERVICE_ACCOUNT_PATH: str = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-GOOGLE_SHEET_ID: str             = os.environ["GOOGLE_SHEET_ID"]
-
 # ── LLM ─────────────────────────────────────────────────────────────────────
 # Fast model: 15 RPM free-tier, supports vision — used for agent reasoning + vision extraction
 LLM_MODEL_FAST  = "gemini-3.5-flash"
@@ -50,14 +46,16 @@ def extract_text(response) -> str:
 
 # ── Retry helper ─────────────────────────────────────────────────────────────
 def invoke_with_retry(llm, *args, **kwargs):
-    """Calls llm.invoke() with exponential backoff on 429 RESOURCE_EXHAUSTED."""
+    """Calls llm.invoke() with exponential backoff on 429 RESOURCE_EXHAUSTED or 504 DEADLINE_EXCEEDED."""
     for attempt in range(5):
         try:
             return llm.invoke(*args, **kwargs)
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err \
+                    or "504" in err or "DEADLINE_EXCEEDED" in err:
                 wait = (2 ** attempt) + random.uniform(0, 1)
-                print(f"  [retry] quota hit — waiting {wait:.1f}s (attempt {attempt + 1}/5)")
+                print(f"  [retry] transient error — waiting {wait:.1f}s (attempt {attempt + 1}/5): {err[:80]}")
                 time.sleep(wait)
             else:
                 raise
@@ -71,14 +69,17 @@ def invoke_with_retry_slow(llm, *args, **kwargs):
 
     Waits 15s, 30s, 60s, 120s, 240s — total ~7.5 minutes across all retries.
     This ensures the 60-second RPM window resets before each attempt.
+    Handles both 429 RESOURCE_EXHAUSTED and 504 DEADLINE_EXCEEDED.
     """
     for attempt in range(5):
         try:
             return llm.invoke(*args, **kwargs)
         except Exception as e:
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err \
+                    or "504" in err or "DEADLINE_EXCEEDED" in err:
                 wait = (15 * (2 ** attempt)) + random.uniform(0, 2)
-                print(f"  [retry-slow] quota hit — waiting {wait:.1f}s (attempt {attempt + 1}/5)")
+                print(f"  [retry-slow] transient error — waiting {wait:.1f}s (attempt {attempt + 1}/5): {err[:80]}")
                 time.sleep(wait)
             else:
                 raise
@@ -89,12 +90,6 @@ TMP_DIR = "C:/tmp/past_papers"          # ← fixed for Windows
 os.makedirs(TMP_DIR, exist_ok=True)
 
 # ── Columns ──────────────────────────────────────────────────────────────────
-SHEETS_COLUMNS = [
-    "paper", "board", "level", "subject",
-    "question_number", "question_text",
-    "marks", "answer", "mark_breakdown", "additional_guidance",
-]
-
 HTML_COLUMNS = [
     "paper", "board", "level", "subject",
     "question_number", "question_text",
@@ -102,5 +97,3 @@ HTML_COLUMNS = [
     "diagram",                          # ← cropped diagram image column for HTML output
 ]
 
-# ── Search ───────────────────────────────────────────────────────────────────
-SERPER_NUM_PER_PAGE = 10

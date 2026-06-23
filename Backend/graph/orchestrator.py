@@ -1,32 +1,32 @@
 
-from langgraph.types import Command
-
+import asyncio
+import glob
 import json
-import re
-from typing import Any
-from datetime import datetime
 import os
+import re
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Any
 from config.settings import TMP_DIR
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt
-from agents.agent2_pairing import build_pairing_agent
-from graph import state
 from graph.state import AgentState
-from agents.agent1_query_search import build_query_search_agent
-from agents.agent3_downloader_extractor import build_downloader_extractor_agent
-from tools.agent4_tools import append_to_google_sheets
+from graph.progress import report as _progress, set_callback, clear_callback
+from agents.agent2_downloader_extractor import build_downloader_extractor_agent
+from agents.agent1_query_parser import parse_metadata
+from agents.agent3_prompt_generator import generate_eval_prompt
+from agents.agent4_answer_generator import generate_answers
+from agents.agent5_evaluator import evaluate_answer, evaluate_all_answers
+from agents.agent6_verifier import verify_evaluation, verify_all_answers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-MAX_RETRIES = 3
-
 def _safe_json(text) -> Any:
     """Extract the first JSON object or array from a possibly-noisy string."""
-    # Handle Gemini-style list of content blocks
     if isinstance(text, list):
         text = " ".join(
             block.get("text", "") if isinstance(block, dict) else str(block)
@@ -47,416 +47,147 @@ def _safe_json(text) -> Any:
     return {}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 0 — Search Tool Selector (NEW)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def node_search_tool_selector(state: AgentState) -> AgentState:
-    print("\n" + "="*60)
-    print("NODE 0: Search Tool Selector")
-    print("="*60)
-
-    # Pause and wait for user input via interrupt
-    # The value returned here comes from Command(resume=value) in run_pipeline
-    user_choice = interrupt(
-        {
-            "message": (
-                "\nSelect search engine:\n"
-                "  [1] Serper (default)\n"
-                "  [2] Perplexity\n"
-                "  [3] Gemini\n"
-                "\nType '1', '2', or '3' and press Enter:"
-            ),
-        }
-    )
-
-    # Map the choice to tool name
-    tools_map = {
-        "1": "serper",
-        "2": "perplexity",
-        "3": "gemini",
-    }
-    
-    selected_tool = tools_map.get(str(user_choice).strip(), "serper")
-    print(f"  Selected: {selected_tool.upper()}")
-
-    # CRITICAL: Match the pattern from node_human_interrupt - unpack state
-    return {**state, "search_tool": selected_tool, "status": "ok"}
+MAX_RETRIES = 3
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 1 — Query Search
-# ─────────────────────────────────────────────────────────────────────────────
+def _norm_q(v: str) -> str:
+    """Normalise a question-number string for map keys and lookups.
 
-def node_query_search(state: AgentState) -> AgentState:
-    print("\n" + "="*60)
-    print("NODE 1: Query Parser + Search Agent")
-    print(f"  Tool: {state.get('search_tool', 'serper')}")
-    print("="*60)
+    Strips leading 'question ' prefix and removes parentheses / spaces so that
+    labels like '2(a)', 'Question 2a', and '2 a' all collapse to '2a'.
+    """
+    v = v.strip().lower()
+    v = re.sub(r"^question\s*", "", v)
+    v = re.sub(r"[() ]", "", v)
+    return v
 
-    agent = build_query_search_agent()
-    
-    search_tool = state.get("search_tool", "serper")
-    # Pass tool selection in message
-    message = f"Use search tool: {search_tool}\n\n{state['user_query']}"
-    retry_count = state.get("retry_count", 0)
-    if retry_count > 0:
-        wait = 20
-        print(f"\n   Retry #{retry_count} — waiting {wait}s to avoid rate limit...")
-        import time
-        time.sleep(wait)
-    while True:
-        result = agent.invoke({"messages": [("user", message)]})
-        raw_output = result["messages"][-1].content
-        parsed = _safe_json(raw_output)
 
-        # Agent 1 signals bad query — re-prompt the user right here
-        if "error" in parsed:
-            print(f"\n  ⚠️  {parsed['error']}")
-            new_query = input("  Please refine your query: ").strip()
-            state = {**state, "user_query": new_query}
-            message = f"Use search tool: {search_tool}\n\n{new_query}"
+def _build_diagram_map(saved_diagrams: list) -> dict:
+    """Build a diagram-map dict deterministically from a raw saved_diagrams list."""
+    dm = {}
+    for item in saved_diagrams:
+        path = item.get("file_path", "")
+        if not path:
             continue
+        fig = _norm_q(str(item.get("figure_number") or ""))
+        tbl = _norm_q(str(item.get("table_number")  or ""))
+        q   = _norm_q(str(item.get("question_number") or ""))
+        if fig:
+            dm[f"fig:{fig}"] = path
+        if tbl:
+            dm[f"tbl:{tbl}"] = path
+        if q:
+            dm[f"q:{q}"] = path
+    return dm
 
-        break  # Agent 1 accepted the query
 
-    tagged_results = parsed.get("tagged_results", [])
-    print(f"  Tagged pool size: {len(tagged_results)}")
-    print(f"  QPs found: {sum(1 for r in tagged_results if r.get('tag') == 'QP')}")
-    print(f"  MSs found: {sum(1 for r in tagged_results if r.get('tag') == 'MS')}")
+def build_feedback_string(failed_answers: list) -> str:
+    """Concatenate verification issues from all failed answers into one labelled block."""
+    blocks = []
+    for answer in failed_answers:
+        v         = answer.get("verification", {})
+        issues    = v.get("issues", [])
+        reasoning = v.get("reasoning", "")
+        aid       = answer.get("answer_id", "?")
+        if issues or reasoning:
+            lines = [f"Answer {aid}:"]
+            for issue in issues:
+                lines.append(f"  - {issue}")
+            if reasoning:
+                lines.append(f"  Reasoning: {reasoning}")
+            blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) if blocks else "Grade inconsistent with mark scheme."
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 1 — Parse Metadata
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_parse_metadata(state: AgentState) -> AgentState:
+    print("\n" + "="*60)
+    print("NODE 1: Query Parser")
+    print("="*60)
+
+    qp_url          = state.get("qp_url", "")
+    qp_metadata_raw = state.get("qp_metadata_raw", "")
+    ms_url          = state.get("ms_url", "")
+    ms_metadata_raw = state.get("ms_metadata_raw", "")
+
+    parsed = parse_metadata(qp_url, qp_metadata_raw, ms_url, ms_metadata_raw)
+
+    board        = parsed.get("board", "")
+    level        = parsed.get("level", "")
+    subject      = parsed.get("subject", "")
+    year         = parsed.get("year", "")
+    paper_code   = parsed.get("paper_code", "")
+    paper_number = parsed.get("paper_number", "")
+    tier         = parsed.get("tier", "")
+    warning      = parsed.get("mismatch_warning", "")
+
+    print(f"  board={board}  level={level}  subject={subject}  year={year}")
+    print(f"  paper_code={paper_code}  paper_number={paper_number}  tier={tier}")
+    if warning:
+        print(f"  WARNING: {warning}")
+
+    pairs_json = json.dumps([{
+        "qp_url":   qp_url,
+        "ms_url":   ms_url,
+        "qp_title": qp_metadata_raw,
+        "ms_title": ms_metadata_raw,
+    }])
 
     return {
         **state,
-        "board":               parsed.get("board", ""),
-        "level":               parsed.get("level", ""),
-        "subject":             parsed.get("subject", ""),
-        "year":                parsed.get("year", ""),
-        "qp_query":            parsed.get("qp_query", ""),
-        "ms_query":            parsed.get("ms_query", ""),
-        "tagged_results_json": json.dumps(tagged_results),
-        "status":              "ok",
-        "error_message":       None,
+        "board":        board,
+        "level":        level,
+        "subject":      subject,
+        "year":         year,
+        "paper_code":   paper_code,
+        "paper_number": paper_number,
+        "tier":         tier,
+        "pairs_json":   pairs_json,
+        "status":       "ok",
+        "error_message": None,
     }
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 2 — Pairing
-# ─────────────────────────────────────────────────────────────────────────────
-def node_pairing(state: AgentState) -> AgentState:
-    print("\n" + "="*60)
-    print("NODE 2: Pairing Agent")
-    print("="*60)
-
-    agent = build_pairing_agent()
-
-    metadata = json.dumps({
-        "board":   state.get("board", ""),
-        "level":   state.get("level", ""),
-        "subject": state.get("subject", ""),
-        "year":    state.get("year", ""),
-    })
-
-    tagged_results = json.loads(state.get("tagged_results_json", "[]"))
-    qps = [{"title": r["title"], "url": r["url"]} for r in tagged_results if r.get("tag") == "QP"]
-    mss = [{"title": r["title"], "url": r["url"]} for r in tagged_results if r.get("tag") == "MS"]
-
-    print(f"  QPs: {len(qps)} | MSs: {len(mss)}")
-
-    if not qps or not mss:
-        print("  Insufficient QPs or MSs — skipping.")
-        return {**state, "pairs_json": json.dumps([]), "status": "ok"}
-
-    message = (
-        f"metadata={metadata}\n\n"
-        f"qp_list={json.dumps(qps)}\n\n"
-        f"ms_list={json.dumps(mss)}"
-    )
-
-    result = agent.invoke({"messages": [("user", message)]})
-    raw_output = result["messages"][-1].content
-    parsed = _safe_json(raw_output)
-
-    pairs = parsed.get("pairs", [])
-    print(f"  Confirmed pairs: {len(pairs)}")
-    for p in pairs:
-        print(f"    QP: {p.get('qp_title', '?')}")
-        print(f"    MS: {p.get('ms_title', '?')}")
-
-    if not pairs:
-        return {
-        **state,
-        "pairs_json": json.dumps([]),
-        "retry_count": state.get("retry_count", 0) + 1,
-        "status": "ok",
-    }
-
-    return {**state, "pairs_json": json.dumps(pairs), "status": "ok"}
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 3 — Human Interrupt (Images choice)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def node_human_interrupt(state: AgentState) -> AgentState:
-    print("\n" + "="*60)
-    print("NODE 3: Human Interrupt — Image choice")
-    print("="*60)
-
-    pairs = json.loads(state.get("pairs_json", "[]"))
-
-    if not pairs:
-        print("  No confirmed pairs — skipping interrupt, proceeding to report.")
-        return {**state, "include_images": False, "status": "ok"}
-
-    print("\n  Confirmed pairs found:")
-    for i, p in enumerate(pairs, 1):
-        print(f"    {i}. QP: {p.get('qp_title', 'unknown')}")
-        print(f"       MS: {p.get('ms_title', 'unknown')}")
-
-    user_choice = interrupt(
-        {
-            "message": (
-                "\nMatched pairs are ready.\n"
-                "Choose output format:\n"
-                "  [1] Text only  -> append to Google Sheets\n"
-                "  [2] Text + Images -> export to HTML (.html)\n"
-                "\nType '1' or '2' and press Enter:"
-            ),
-            "pairs_count": len(pairs),
-        }
-    )
-
-    include_images = False
-    if str(user_choice).strip() in ("2", "yes", "images", "excel"):
-        include_images = True
-        print("  User chose: Text + Images -> Excel")
-    else:
-        print("  User chose: Text only -> Google Sheets")
-
-    return {**state, "include_images": include_images, "status": "ok"}
-
-#_______________________________________________________________________________
-#HTML Function 
-#_______________________________________________________________________________
-def _build_summary_html(tmp_dir: str) -> str:
-    """
-    Reads all per-pair JSON files from TMP_DIR and writes one elegant HTML file.
-    Called right after the Agent 3 loop completes.
-    """
-    import glob
-
-    # ── Collect all per-pair JSON files ──
-    json_files = sorted(glob.glob(os.path.join(tmp_dir, "*.json")))
-    if not json_files:
-        print("  No JSON files found in TMP_DIR — skipping HTML build.")
-        return ""
-
-    all_rows = []
-    for jf in json_files:
-        try:
-            with open(jf, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list):
-                all_rows.extend(data)
-        except Exception as e:
-            print(f"  Skipping {jf}: {e}")
-
-    if not all_rows:
-        print("  No rows found across JSON files — skipping HTML build.")
-        return ""
-
-    def _esc(text: str) -> str:
-        return (str(text)
-                .replace("&", "&amp;")
-                .replace("<", "&lt;")
-                .replace(">", "&gt;")
-                .replace('"', "&quot;"))
-
-    def _cell(text: str) -> str:
-        # HTML-escape plain text but leave $...$ and $$...$$ spans raw so MathJax renders them.
-        parts = re.split(r'(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$)', str(text))
-        return "".join(p if p.startswith("$") else _esc(p) for p in parts)
-
-    def _img_tag(path: str) -> str:
-        if not path or not os.path.exists(path):
-            return "<span style='color:#aaa;'>No diagram</span>"
-        # Embed as base64 so HTML is fully self-contained
-        import base64
-        with open(path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        return f'<img src="data:image/png;base64,{b64}" style="max-width:280px;max-height:180px;border:1px solid #ddd;border-radius:4px;">'
-
-    TEXT_COLS = [
-        "paper", "board", "level", "subject",
-        "question_number", "question_text",
-        "marks", "answer", "mark_breakdown", "additional_guidance",
-    ]
-
-    # ── Group rows by paper ──
-    from collections import defaultdict
-    grouped = defaultdict(list)
-    for row in all_rows:
-        key = row.get("paper", "Unknown Paper")
-        grouped[key].append(row)
-
-    # ── Build HTML sections per paper ──
-    sections = []
-    for paper_name, rows in grouped.items():
-        header_cells = "".join(f"<th>{_esc(c)}</th>" for c in TEXT_COLS) + "<th>Diagram</th>"
-
-        body_rows = []
-        for row in rows:
-            cells = ""
-            for col in TEXT_COLS:
-                val = str(row.get(col, ""))
-                cells += f"<td>{_cell(val)}</td>"
-            cells += f"<td>{_img_tag(row.get('diagram_path', ''))}</td>"
-            body_rows.append(f"<tr>{cells}</tr>")
-
-        sections.append(f"""
-        <div class="paper-section">
-            <h2>{_esc(paper_name)}</h2>
-            <p class="meta">{len(rows)} question(s)</p>
-            <div class="table-wrap">
-            <table>
-                <thead><tr>{header_cells}</tr></thead>
-                <tbody>{"".join(body_rows)}</tbody>
-            </table>
-            </div>
-        </div>
-        """)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    html = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<script>
-MathJax = {{
-  tex: {{
-    inlineMath: [['$', '$']],
-    displayMath: [['$$', '$$']],
-    packages: {{'[+]': ['mhchem']}}
-  }},
-  loader: {{load: ['[tex]/mhchem']}}
-}};
-</script>
-<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-<title>Past Papers Export — {timestamp}</title>
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 13px;
-    background: #f0f2f5;
-    color: #222;
-    padding: 24px;
-  }}
-  h1 {{
-    font-size: 22px;
-    color: #1a1a2e;
-    margin-bottom: 6px;
-  }}
-  .subtitle {{
-    color: #666;
-    font-size: 12px;
-    margin-bottom: 28px;
-  }}
-  .paper-section {{
-    background: #fff;
-    border-radius: 10px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-    margin-bottom: 32px;
-    padding: 20px 24px;
-  }}
-  .paper-section h2 {{
-    font-size: 16px;
-    color: #2c3e50;
-    margin-bottom: 4px;
-    border-left: 4px solid #3498db;
-    padding-left: 10px;
-  }}
-  .meta {{
-    font-size: 11px;
-    color: #999;
-    margin-bottom: 14px;
-    padding-left: 14px;
-  }}
-  .table-wrap {{
-    overflow-x: auto;
-  }}
-  table {{
-    border-collapse: collapse;
-    width: 100%;
-    min-width: 900px;
-  }}
-  th {{
-    background: #2c3e50;
-    color: #fff;
-    padding: 9px 10px;
-    text-align: left;
-    font-size: 12px;
-    white-space: nowrap;
-    position: sticky;
-    top: 0;
-  }}
-  td {{
-    border-bottom: 1px solid #eee;
-    padding: 8px 10px;
-    vertical-align: top;
-    line-height: 1.5;
-  }}
-  tr:hover td {{
-    background: #f7faff;
-  }}
-  td:nth-child(6) {{ max-width: 320px; word-wrap: break-word; }}  /* question_text */
-  td:nth-child(8) {{ max-width: 280px; word-wrap: break-word; }}  /* answer */
-  .footer {{
-    text-align: center;
-    color: #bbb;
-    font-size: 11px;
-    margin-top: 16px;
-  }}
-</style>
-</head>
-<body>
-<h1>Past Papers Export</h1>
-<p class="subtitle">Generated: {timestamp} &nbsp;|&nbsp; Total questions: {len(all_rows)}</p>
-
-{"".join(sections)}
-
-<p class="footer">Auto-generated by Past Papers Pipeline</p>
-</body>
-</html>"""
-
-    out_path = os.path.join(tmp_dir, f"summary_{timestamp}.html")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(html)
-
-    print(f"  Summary HTML written: {out_path}")
-    return out_path
-# ─────────────────────────────────────────────────────────────────────────────
-# Node 4 — Downloader + Extractor
+# Node 2 — Downloader + Extractor
 # ─────────────────────────────────────────────────────────────────────────────
 
 def node_downloader_extractor(state: AgentState) -> AgentState:
     print("\n" + "="*60)
-    print("NODE 4: Downloader + Extractor Agent")
-    print(f"  include_images = {state.get('include_images')}")
+    print("NODE 2: Downloader + Extractor Agent")
     print("="*60)
 
+    board      = state.get("board", "")
+    level      = state.get("level", "")
+    subject    = state.get("subject", "")
+    year       = state.get("year", "")
+    paper_code = state.get("paper_code", "")
+    tier       = state.get("tier", "")
+
+    paper_str = " ".join(filter(None, [
+        board, level, subject, year,
+        f"Paper {paper_code}" if paper_code else "",
+    ]))
+
     metadata = json.dumps({
-        "paper":   f"{state.get('board','')} {state.get('level','')} {state.get('subject','')} {state.get('year','')}".strip(),
-        "board":   state.get("board", ""),
-        "level":   state.get("level", ""),
-        "subject": state.get("subject", ""),
+        "paper":      paper_str,
+        "board":      board,
+        "level":      level,
+        "subject":    subject,
+        "year":       year,
+        "paper_code": paper_code,
+        "tier":       tier,
     })
 
     pairs = json.loads(state.get("pairs_json", "[]"))
-    include_images = state.get("include_images", False)
+    include_images = True
 
     all_rows = []
     all_diagram_map = {}
     all_failed_pairs = []
-
-    
 
     for i, pair in enumerate(pairs):
         agent = build_downloader_extractor_agent()
@@ -464,54 +195,53 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
 
         message = (
             f"include_images={include_images}\n"
-            f"paper_number={i+1}\n\n" 
+            f"paper_number={i+1}\n\n"
             f"metadata={metadata}\n\n"
             f"{json.dumps([pair])}"
         )
 
         try:
             result = agent.invoke({"messages": [("user", message)]})
-            raw_output = result["messages"][-1].content
-            parsed = _safe_json(raw_output)
+
+            parsed = {}
+            for msg in reversed(result["messages"]):
+                content = msg.content
+                if isinstance(content, list):
+                    content = " ".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in content
+                    )
+                candidate = _safe_json(str(content)) if content else {}
+                if candidate.get("extracted_rows") or candidate.get("rows"):
+                    parsed = candidate
+                    break
 
             rows         = parsed.get("extracted_rows", parsed.get("rows", []))
             diagram_maps = parsed.get("diagram_maps", {})
-            # Per-paper map for this pair; fall back to legacy flat key for compatibility
-            diagram_map  = diagram_maps.get(str(i + 1), parsed.get("diagram_map", {}))
+
+            # Prefer deterministic Python rebuild over LLM-constructed diagram_maps
+            raw_saved = parsed.get("saved_diagrams_by_paper", {}).get(str(i + 1), [])
+            if raw_saved:
+                diagram_map = _build_diagram_map(raw_saved)
+            else:
+                diagram_map = diagram_maps.get(str(i + 1), parsed.get("diagram_map", {}))
+
+            for row in rows:
+                fig = _norm_q(str(row.get("figure_number") or ""))
+                tbl = _norm_q(str(row.get("table_number")  or ""))
+                q   = _norm_q(str(row.get("question_number") or ""))
+                row["image_path"] = (
+                    (diagram_map.get(f"fig:{fig}") if fig else None)
+                    or (diagram_map.get(f"tbl:{tbl}") if tbl else None)
+                    or (diagram_map.get(f"q:{q}")   if q   else None)
+                    or ""
+                )
 
             all_rows.extend(rows)
             all_diagram_map.update(diagram_map)
             all_failed_pairs.extend(parsed.get("failed_pairs", []))
 
             print(f"  Pair {i+1} → {len(rows)} questions extracted")
-
-            # ── Write per-pair JSON immediately after each pair ──
-            if include_images and rows:
-                safe_title = re.sub(r"[^a-zA-Z0-9_-]", "_", pair.get("qp_title", f"pair_{i+1}"))[:60]
-                timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename   = f"{safe_title}_pair{i+1}_{timestamp}.json"
-                out_path   = os.path.join(TMP_DIR, filename)
-
-                enriched_rows = []
-                for row in rows:
-                    # Use this row's paper_number to pick the right scoped map
-                    row_paper_map = diagram_maps.get(str(row.get("paper_number", i + 1)), diagram_map)
-                    fig_key = f'fig:{row.get("figure_number", "").strip()}'
-                    tbl_key = f'tbl:{row.get("table_number",  "").strip()}'
-                    q_key   = f'q:{row.get("question_number", "").strip()}'
-
-                    diagram_path = (
-                        row_paper_map.get(fig_key)
-                        or row_paper_map.get(tbl_key)
-                        or row_paper_map.get(q_key)
-                        or ""
-                    )
-                    enriched_rows.append({**row, "diagram_path": diagram_path})
-
-                with open(out_path, "w", encoding="utf-8") as f:
-                    json.dump(enriched_rows, f, indent=2, ensure_ascii=False)
-
-                print(f"  Per-pair JSON written: {out_path}")
 
         except Exception as e:
             print(f"  Pair {i+1} failed with exception: {e}")
@@ -528,20 +258,21 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
         for fp in all_failed_pairs:
             print(f"    QP: {fp.get('qp_url', '?')} — Reason: {fp.get('reason', '?')}")
 
-        retry_count = state.get("retry_count", 0)
-        if retry_count < MAX_RETRIES and len(all_rows) == 0:
-            print(f"  All pairs failed — triggering retry #{retry_count + 1}")
-            return {
-                **state,
-                "extracted_rows_json": json.dumps([]),
-                "error_message":       f"All pairs failed on attempt {retry_count + 1}: {all_failed_pairs}",
-                "retry_count":         retry_count + 1,
-                "status":              "retry",
-            }
+    if not all_rows:
+        print("\n  No questions extracted.")
+    else:
+        print("\n  Extracted questions:")
+        for row in all_rows:
+            q_num  = row.get("question_number", "?")
+            q_text = row.get("question_text", "")
+            preview = q_text[:80] + ("..." if len(q_text) > 80 else "")
+            print(f"    Q{q_num}: {preview}")
 
-    # ── Build summary HTML from all per-pair JSONs ──
-    if include_images:
-        _build_summary_html(TMP_DIR)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path  = os.path.join(TMP_DIR, f"extracted_{timestamp}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(all_rows, f, indent=2, ensure_ascii=False)
+        print(f"\n  Rows saved to: {out_path}")
 
     return {
         **state,
@@ -550,179 +281,512 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
         "status":              "ok",
         "error_message":       None,
     }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Node 5 — Feeder (Google Sheets)
+# Node 3 — Prompt Generator
 # ─────────────────────────────────────────────────────────────────────────────
 
-def node_feeder(state: AgentState) -> AgentState:
+def node_generate_prompts(state: AgentState) -> AgentState:
     print("\n" + "="*60)
-    print("NODE 5: Feeder")
-    print(f"  Destination: {'HTML' if state.get('include_images') else 'Google Sheets'}")
+    print("NODE 3: Prompt Generator")
     print("="*60)
 
-    include_images = state.get("include_images", False)
+    rows = json.loads(state.get("extracted_rows_json", "[]"))
 
-    if include_images:
-        print("  Please Check the generated HTML file in the TMP_DIR for the exported QP,MS and diagrams.")
-        return {**state, "status": "done"}
+    if not rows:
+        print("\n  No extracted rows — skipping prompt generation.")
+        return {**state, "status": "ok"}
 
-    rows_json = state["extracted_rows_json"]
+    metadata = {
+        "board":      state.get("board", ""),
+        "level":      state.get("level", ""),
+        "subject":    state.get("subject", ""),
+        "year":       state.get("year", ""),
+        "paper_code": state.get("paper_code", ""),
+        "tier":       state.get("tier", ""),
+    }
 
-    raw    = append_to_google_sheets.invoke({"rows_json": rows_json})
-    result = json.loads(raw)
+    total = len(rows)
+    print(f"\n  Generating evaluation prompts for {total} question(s) (parallel)...")
+    _done = [0]
+    _done_lock = threading.Lock()
 
-    if result.get("success"):
-        print(f"  Rows written: {result.get('rows_written') or result.get('rows_appended', '?')}")
-        if result.get("path"):
-            print(f"  Output: {result.get('path')}")
-    else:
-        print(f"  Feeder error: {result.get('error', 'unknown')}")
-
-    return {**state, "status": "done"}
-# ─────────────────────────────────────────────────────────────────────────────
-# Routing logic
-# ─────────────────────────────────────────────────────────────────────────────
-
-def route_after_extraction(state: AgentState) -> str:
-    if state.get("status") == "retry":
-        retry_count = state.get("retry_count", 0)
-        if retry_count <= MAX_RETRIES:
-            print(f"\n  Routing back to Agent 1 (retry {retry_count}/{MAX_RETRIES})")
-            return "query_search"
+    def _gen_prompt(row):
+        q_num     = row.get("question_number", "?")
+        answer    = (row.get("answer") or "").strip()
+        breakdown = (row.get("mark_breakdown") or "").strip()
+        if not answer and not breakdown:
+            row["eval_prompt"] = ""
+            print(f"    Q{q_num}: no mark scheme — skipped")
         else:
-            print(f"\n  Max retries ({MAX_RETRIES}) reached — aborting.")
-            return END
+            row["eval_prompt"] = generate_eval_prompt(row, metadata)
+            print(f"    Q{q_num}: prompt generated")
+        with _done_lock:
+            _done[0] += 1
+            _progress(f"Generating prompts… {_done[0]}/{total}", 20 + int(15 * _done[0] / total))
+        return row
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        rows = list(ex.map(_gen_prompt, rows))
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path  = os.path.join(TMP_DIR, f"extracted_with_prompts_{timestamp}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+    print(f"\n  Enriched rows saved to: {out_path}")
+
+    return {
+        **state,
+        "extracted_rows_json": json.dumps(rows),
+        "status":              "ok",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 4 — Answer Generator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_generate_answers(state: AgentState) -> AgentState:
+    print("\n" + "="*60)
+    print("NODE 4: Answer Generator")
+    print("="*60)
 
     rows = json.loads(state.get("extracted_rows_json", "[]"))
+
     if not rows:
-        print("\n  No extracted rows — ending without writing.")
-        return END
+        print("\n  No extracted rows — skipping answer generation.")
+        return {**state, "status": "ok"}
 
-    return "feeder"
+    metadata = {
+        "board":      state.get("board", ""),
+        "level":      state.get("level", ""),
+        "subject":    state.get("subject", ""),
+        "year":       state.get("year", ""),
+        "paper_code": state.get("paper_code", ""),
+        "tier":       state.get("tier", ""),
+    }
 
+    total = len(rows)
+    print(f"\n  Generating answers for {total} question(s) (parallel)...")
+    _done = [0]
+    _done_lock = threading.Lock()
 
-def route_after_pairing(state: AgentState) -> str:
-    pairs = json.loads(state.get("pairs_json", "[]"))
-    if not pairs:
-        retry_count = state.get("retry_count", 0)
-        if retry_count < MAX_RETRIES:
-            print(f"\n  No pairs found — retrying search (attempt {retry_count + 1}/{MAX_RETRIES})")
-            return "query_search"
-        print(f"\n  No pairs found after {MAX_RETRIES} retries — ending pipeline.")
-        return END
-    return "human_interrupt"
+    def _gen_answers(row):
+        q_num = row.get("question_number", "?")
+        if not row.get("eval_prompt"):
+            row["answers"] = []
+            print(f"    Q{q_num}: no eval_prompt — skipped")
+        else:
+            row["answers"] = generate_answers(row, metadata)
+            print(f"    Q{q_num}: {len(row['answers'])} answers generated")
+        with _done_lock:
+            _done[0] += 1
+            _progress(f"Generating answers… {_done[0]}/{total}", 35 + int(20 * _done[0] / total))
+        return row
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        rows = list(ex.map(_gen_answers, rows))
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path  = os.path.join(TMP_DIR, f"extracted_with_answers_{timestamp}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+    print(f"\n  Enriched rows saved to: {out_path}")
+
+    return {
+        **state,
+        "extracted_rows_json": json.dumps(rows),
+        "status":              "ok",
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Graph assembly (Corrected)
+# Node 5 — Evaluator
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_evaluate_answers(state: AgentState) -> AgentState:
+    print("\n" + "="*60)
+    print("NODE 5: Evaluator")
+    print("="*60)
+
+    rows = json.loads(state.get("extracted_rows_json", "[]"))
+
+    if not rows:
+        print("\n  No extracted rows — skipping evaluation.")
+        return {**state, "status": "ok"}
+
+    total = len(rows)
+    _done = [0]
+    _done_lock = threading.Lock()
+
+    def _eval_row(row):
+        q_num       = row.get("question_number", "?")
+        answers     = row.get("answers", [])
+        eval_prompt = row.get("eval_prompt", "")
+        if not answers:
+            print(f"  Q{q_num}: no answers — skipped")
+        else:
+            evaluations = evaluate_all_answers(eval_prompt, answers)
+            for answer, evaluation in zip(answers, evaluations):
+                answer["evaluation"] = evaluation
+            print(f"  Q{q_num}: graded {len(evaluations)}/{len(answers)} answers (batch)")
+            for answer in answers:
+                ev    = answer["evaluation"]
+                cat   = answer.get("category", "?")
+                score = "ERR" if "error" in ev else f"{ev.get('awarded_marks', '?')}/{ev.get('max_marks', '?')}"
+                print(f"    {cat:<18} -> {score}")
+        with _done_lock:
+            _done[0] += 1
+            _progress(f"Evaluating answers… {_done[0]}/{total}", 55 + int(20 * _done[0] / total))
+        return row
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        rows = list(ex.map(_eval_row, rows))
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path  = os.path.join(TMP_DIR, f"extracted_with_evaluations_{timestamp}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+    print(f"\n  Enriched rows saved to: {out_path}")
+
+    return {
+        **state,
+        "extracted_rows_json": json.dumps(rows),
+        "status":              "ok",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 6 — Verifier + Refine Loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_verify_and_refine(state: AgentState) -> AgentState:
+    print("\n" + "="*60)
+    print("NODE 6: Verifier + Refine Loop")
+    print("="*60)
+
+    rows = json.loads(state.get("extracted_rows_json", "[]"))
+
+    if not rows:
+        print("\n  No extracted rows — skipping verification.")
+        return {**state, "status": "done"}
+
+    metadata = {
+        "board":      state.get("board", ""),
+        "level":      state.get("level", ""),
+        "subject":    state.get("subject", ""),
+        "year":       state.get("year", ""),
+        "paper_code": state.get("paper_code", ""),
+        "tier":       state.get("tier", ""),
+    }
+
+    total = len(rows)
+    _done = [0]
+    _done_lock = threading.Lock()
+
+    def _verify_row(row):
+        q_num   = row.get("question_number", "?")
+        answers = row.get("answers", [])
+
+        if not answers:
+            row["verification_status"] = "skipped"
+            print(f"\n  Q{q_num}: no answers — skipped")
+        else:
+            row["prompt_version"] = 0
+            attempt = 0
+
+            while True:
+                # Verify all answers in one batch call
+                verdicts = verify_all_answers(row, answers)
+                for answer, verdict in zip(answers, verdicts):
+                    answer["verification"] = verdict
+
+                failed = [a for a in answers if a["verification"]["verdict"] == "fail"]
+
+                if not failed:
+                    row["verification_status"] = "validated"
+                    break
+
+                if attempt >= MAX_RETRIES:
+                    row["verification_status"] = "unconvergeable"
+                    break
+
+                attempt += 1
+                row["prompt_version"] = attempt
+
+                # Build one feedback block from all failures
+                feedback = build_feedback_string(failed)
+
+                # Refine this question's eval_prompt using Phase 1 generator + feedback
+                row["eval_prompt"] = generate_eval_prompt(row, metadata, feedback=feedback)
+
+                # Re-grade ALL answers against the new prompt (individual calls for precision)
+                for answer in answers:
+                    answer["evaluation"] = evaluate_answer(
+                        row["eval_prompt"], answer.get("answer_text", "")
+                    )
+
+            pass_count = sum(1 for a in answers if a.get("verification", {}).get("verdict") == "pass")
+            status = row["verification_status"]
+            print(f"\n  Q{q_num}: {status} after {attempt} refine(s) — {pass_count}/{len(answers)} passed")
+
+        with _done_lock:
+            _done[0] += 1
+            _progress(f"Verifying grades… {_done[0]}/{total}", 75 + int(15 * _done[0] / total))
+        return row
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        rows = list(ex.map(_verify_row, rows))
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path  = os.path.join(TMP_DIR, f"final_{timestamp}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=2, ensure_ascii=False)
+    print(f"\n  Final rows saved to: {out_path}")
+
+    return {
+        **state,
+        "extracted_rows_json": json.dumps(rows),
+        "status":              "done",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node 7 — Save to Database
+# ─────────────────────────────────────────────────────────────────────────────
+
+def node_save_to_db(state: AgentState) -> AgentState:
+    print("\n" + "="*60)
+    print("NODE 7: Save to Database")
+    print("="*60)
+
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from db.models import Paper, Question, Answer, Image as DBImage
+
+    rows = json.loads(state.get("extracted_rows_json", "[]"))
+
+    if not rows:
+        print("\n  No rows to save.")
+        return {**state, "status": "done"}
+
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        print("\n  DATABASE_URL not set — skipping DB save.")
+        return {**state, "status": "done"}
+
+    async def _persist():
+        engine  = create_async_engine(db_url)
+        Session = async_sessionmaker(engine, expire_on_commit=False)
+
+        crop_files: list[str] = []  # collect paths to delete after commit
+
+        async with Session() as session:
+            # One Paper row per pipeline run, built from state metadata
+            paper_num_raw = state.get("paper_number", "")
+            paper = Paper(
+                board        = state.get("board")        or rows[0].get("board"),
+                level        = state.get("level")        or rows[0].get("level"),
+                subject      = state.get("subject")      or rows[0].get("subject"),
+                year         = state.get("year")         or rows[0].get("year"),
+                paper_code   = state.get("paper_code")   or None,
+                paper_number = int(paper_num_raw) if str(paper_num_raw).isdigit() else None,
+                tier         = state.get("tier")         or None,
+            )
+            session.add(paper)
+
+            for row in rows:
+                q = Question(
+                    question_number     = str(row.get("question_number", "")),
+                    question_text       = row.get("question_text", ""),
+                    marks               = row.get("marks") or None,
+                    answer              = row.get("answer") or None,
+                    mark_breakdown      = row.get("mark_breakdown") or None,
+                    additional_guidance = row.get("additional_guidance") or None,
+                    eval_prompt         = row.get("eval_prompt") or None,
+                    verification_status = row.get("verification_status") or None,
+                )
+                q.paper = paper
+                session.add(q)
+
+                for ans in row.get("answers", []):
+                    ev      = ans.get("evaluation", {}) or {}
+                    vf      = ans.get("verification", {}) or {}
+                    verdict = vf.get("verdict")
+                    awarded = ev.get("awarded_marks")
+                    a = Answer(
+                        category     = ans.get("category", ""),
+                        answer_text  = ans.get("answer_text", ""),
+                        awarded_marks= int(awarded) if isinstance(awarded, (int, float)) else None,
+                        verified     = (verdict == "pass") if verdict in ("pass", "fail") else None,
+                    )
+                    a.question = q
+                    session.add(a)
+
+                # Read image bytes → save to DB → mark file for deletion
+                image_path = row.get("image_path", "")
+                if image_path and os.path.exists(image_path):
+                    try:
+                        with open(image_path, "rb") as f:
+                            img_bytes = f.read()
+                        img = DBImage(
+                            figure_number = str(row.get("figure_number") or ""),
+                            image_bytes   = img_bytes,
+                            mime_type     = "image/png",
+                        )
+                        img.question = q
+                        session.add(img)
+                        crop_files.append(image_path)
+                    except Exception as exc:
+                        print(f"  Warning: could not read image {image_path}: {exc}")
+
+            await session.commit()
+            await session.refresh(paper)
+            saved_paper_id = paper.id
+
+        await engine.dispose()
+
+        # Delete cropped diagram files now that bytes are safely in the DB
+        for path in crop_files:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        return saved_paper_id
+
+    paper_id = None
+    try:
+        paper_id = asyncio.run(_persist())
+        print(f"\n  Saved {len(rows)} question(s) to database (paper_id={paper_id}).")
+
+        # Clean up rendered page PNG directories (intermediate vision files)
+        for d in glob.glob(os.path.join(TMP_DIR, "visual_*")):
+            shutil.rmtree(d, ignore_errors=True)
+        print("  Temporary image files cleaned up.")
+    except Exception as exc:
+        print(f"\n  DB save failed: {exc}")
+
+    return {**state, "status": "done", "paper_id": paper_id}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Graph assembly
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_graph():
     builder = StateGraph(AgentState)
 
-    builder.add_node("search_tool_selector",    node_search_tool_selector)
-    builder.add_node("query_search",            node_query_search)
-    builder.add_node("pairing",                 node_pairing)
-    builder.add_node("human_interrupt",         node_human_interrupt)
-    builder.add_node("downloader_extractor",    node_downloader_extractor)
-    builder.add_node("feeder",                  node_feeder)
+    builder.add_node("parse_metadata",       node_parse_metadata)
+    builder.add_node("downloader_extractor", node_downloader_extractor)
+    builder.add_node("generate_prompts",     node_generate_prompts)
+    builder.add_node("generate_answers",     node_generate_answers)
+    builder.add_node("evaluate_answers",     node_evaluate_answers)
+    builder.add_node("verify_and_refine",    node_verify_and_refine)
+    builder.add_node("save_to_db",           node_save_to_db)
 
-    builder.set_entry_point("search_tool_selector")
-    builder.add_edge("search_tool_selector", "query_search")
-    builder.add_edge("query_search", "pairing")
+    builder.set_entry_point("parse_metadata")
+    builder.add_edge("parse_metadata",       "downloader_extractor")
+    builder.add_edge("downloader_extractor", "generate_prompts")
+    builder.add_edge("generate_prompts",     "generate_answers")
+    builder.add_edge("generate_answers",     "evaluate_answers")
+    builder.add_edge("evaluate_answers",     "verify_and_refine")
+    builder.add_edge("verify_and_refine",    "save_to_db")
+    builder.add_edge("save_to_db",           END)
 
-    builder.add_conditional_edges(
-        "pairing",
-        route_after_pairing,
-        {"human_interrupt": "human_interrupt", "query_search": "query_search", END: END},
-    )
+    return builder.compile()
 
-    builder.add_edge("human_interrupt", "downloader_extractor")
 
-    builder.add_conditional_edges(          # ← THIS WAS MISSING
-        "downloader_extractor",
-        route_after_extraction,
-        {"query_search": "query_search", "feeder": "feeder", END: END},
-    )
-
-    builder.add_edge("feeder", END)
-
-    memory = MemorySaver()
-    graph = builder.compile(checkpointer=memory)
-
-    return graph
 # ─────────────────────────────────────────────────────────────────────────────
 # Public runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_pipeline(user_query: str, thread_id: str = "default") -> None:
-    graph = build_graph()
-    config = {"configurable": {"thread_id": thread_id}}
-    initial_state: AgentState = {
-        "user_query":    user_query,
-        "search_tool":   "serper",  # default
-        "retry_count":   0,
-        "status":        "ok",
-        "error_message": None,
-        "include_images": None,
+def _make_initial_state(qp_url, qp_meta, ms_url, ms_meta) -> AgentState:
+    return {
+        "qp_url":          qp_url,
+        "qp_metadata_raw": qp_meta,
+        "ms_url":          ms_url,
+        "ms_metadata_raw": ms_meta,
+        "retry_count":     0,
+        "status":          "ok",
+        "include_images":  True,
     }
+
+
+def run_pipeline() -> None:
+    """Interactive CLI entry point."""
+    qp_url  = input("Enter Question Paper PDF link: ").strip()
+    qp_meta = input("Enter QP metadata (e.g. 'Edexcel GCSE Mathematics 2023 Paper 1H'): ").strip()
+    ms_url  = input("Enter Mark Scheme PDF link: ").strip()
+    ms_meta = input("Enter MS metadata (e.g. 'Edexcel GCSE Mathematics 2023 Paper 1H Mark Scheme'): ").strip()
+
+    graph = build_graph()
+
     print("\n" + "█"*60)
-    print(f"  PIPELINE STARTED: {user_query}")
+    print("  PIPELINE STARTED")
     print("█"*60)
-    
-    # Phase 1 — run until first interrupt (search tool selector)
-    for event in graph.stream(initial_state, config=config, stream_mode="updates"):
+
+    for event in graph.stream(_make_initial_state(qp_url, qp_meta, ms_url, ms_meta), stream_mode="updates"):
         _print_event(event)
-    
-    # Check for search tool interrupt
-    snapshot = graph.get_state(config)
-    if snapshot.next and "search_tool_selector" in snapshot.next:
-        while True:
-            choice = input("\nPlease Enter: \n1 for Serp:\n2 for Perplexity:\n3 for Gemini: ").strip()
-            if choice in ("1", "2", "3"):
-                break
-            print("  Please enter 1, 2, or 3.")
-        tools_map = {"1": "serper", "2": "perplexity", "3": "gemini"}
-        selected_tool = tools_map[choice]
-        print(f"\n  Selected search tool: {selected_tool.upper()}")
-        # Resume with NUMERIC choice (not tool name) — node maps "1"/"2"/"3" to tool name
-        for event in graph.stream(
-            Command(resume=choice),  # ← Pass "1", "2", or "3" — NOT selected_tool
-            config=config,
-            stream_mode="updates",
-            subgraphs=False,
-        ):
-            _print_event(event)
-    
-    # Check for human interrupt (image choice)
-    snapshot = graph.get_state(config)
-    if snapshot.next and "human_interrupt" in snapshot.next:
-        pairs = json.loads(snapshot.values.get("pairs_json", "[]"))
-        print(f"\n  PAUSED — {len(pairs)} pair(s) found:")
-        for i, p in enumerate(pairs, 1):
-            print(f"    {i}. QP: {p.get('qp_title', '?')}")
-            print(f"       MS: {p.get('ms_title', '?')}")
-        print("\n  Choose output format:")
-        print("    [1] Text only     → Google Sheets")
-        print("    [2] Text + Images → HTML (.html)")
-        while True:
-            choice = input("\n  Enter 1 or 2: ").strip()
-            if choice in ("1", "2"):
-                break
-            print("  Please enter 1 or 2.")
-        user_input_arg = "excel" if choice == "2" else "sheets"
-        # Resume
-        for event in graph.stream(
-            Command(resume=user_input_arg),
-            config=config,
-            stream_mode="updates",
-            subgraphs=False,
-        ):
-            _print_event(event)
-    
+
     print("\n" + "█"*60)
     print("  PIPELINE COMPLETE")
     print("█"*60)
+
+
+_NODE_PROGRESS = {
+    "parse_metadata":       ("Downloading and extracting questions…", 5),
+    "downloader_extractor": ("Generating grading prompts…",          20),
+    "generate_prompts":     ("Generating student answers…",          35),
+    "generate_answers":     ("Evaluating answers…",                  55),
+    "evaluate_answers":     ("Verifying grades…",                    75),
+    "verify_and_refine":    ("Saving to database…",                  90),
+    "save_to_db":           ("Done!",                               100),
+}
+
+
+def run_pipeline_with_params(
+    qp_url: str,
+    qp_metadata_raw: str,
+    ms_url: str,
+    ms_metadata_raw: str,
+    progress_cb=None,
+) -> int | None:
+    """Programmatic entry point used by the FastAPI server. Returns the saved paper_id."""
+    if progress_cb:
+        set_callback(progress_cb)
+        progress_cb("Starting pipeline…", 0)
+
+    graph = build_graph()
+
+    print("\n" + "█"*60)
+    print("  PIPELINE STARTED (API)")
+    print("█"*60)
+
+    accumulated: dict = {}
+    try:
+        for event in graph.stream(
+            _make_initial_state(qp_url, qp_metadata_raw, ms_url, ms_metadata_raw),
+            stream_mode="updates",
+        ):
+            _print_event(event)
+            for node_name, updates in event.items():
+                if node_name.startswith("__"):
+                    continue
+                if isinstance(updates, dict):
+                    accumulated.update(updates)
+                if node_name in _NODE_PROGRESS:
+                    msg, pct = _NODE_PROGRESS[node_name]
+                    _progress(msg, pct)
+    finally:
+        if progress_cb:
+            clear_callback()
+
+    print("\n" + "█"*60)
+    print("  PIPELINE COMPLETE")
+    print("█"*60)
+
+    return accumulated.get("paper_id")
 
 
 def _print_event(event: dict) -> None:
@@ -734,7 +798,6 @@ def _print_event(event: dict) -> None:
         for msg in messages:
             msg_type = type(msg).__name__
             if msg_type == "AIMessage":
-                # content may be a list of blocks (Gemini thinking mode) or a plain str
                 raw_c = msg.content
                 if isinstance(raw_c, list):
                     text_c = "".join(
@@ -751,18 +814,10 @@ def _print_event(event: dict) -> None:
                         args_preview = ", ".join(
                             f"{k}={str(v)[:50]}" for k, v in tc["args"].items()
                         )
-                        print(f"  [{node_name}] 🔧 {tc['name']}({args_preview})")
+                        print(f"  [{node_name}] Tool: {tc['name']}({args_preview})")
             elif msg_type == "ToolMessage":
                 raw_tool = msg.content
                 content  = raw_tool if isinstance(raw_tool, str) else str(raw_tool)
                 content  = content.strip()
                 preview  = content[:120] + "..." if len(content) > 120 else content
-                print(f"  [{node_name}] {msg.name} → {preview}")
-
-
-
-
-
-
-
-
+                print(f"  [{node_name}] {msg.name} -> {preview}")

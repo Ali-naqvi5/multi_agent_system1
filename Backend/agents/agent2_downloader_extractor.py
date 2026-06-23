@@ -1,7 +1,7 @@
 from langchain.agents import create_agent
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from tools.agent3_tools import (
+from tools.agent2_tools import (
     extract_pdf_text,
     merge_qp_ms_rows,
     scan_and_render_visual_pages,
@@ -126,6 +126,10 @@ For EACH pair:
         Accumulate into the top-level diagram_maps dict:
             diagram_maps[paper_key] = pair_diagram_map
 
+        Also store the raw saved_diagrams list (unchanged) for this pair so the
+        orchestrator can reconstruct the map deterministically:
+            saved_diagrams_by_paper[paper_key] = saved_diagrams
+
 ═══════════════════════════════════════════════════════════
 RULES (both branches)
 ═══════════════════════════════════════════════════════════
@@ -163,6 +167,14 @@ Branch B:
     "2": {
       "fig:1":  "/path/to/PaperName_Paper2_Figure1.png"
     }
+  },
+  "saved_diagrams_by_paper": {
+    "1": [
+      {"question_number": "3a", "figure_number": "1", "table_number": "", "file_path": "/path/to/PaperName_Figure1.png"}
+    ],
+    "2": [
+      {"question_number": "2",  "figure_number": "",  "table_number": "", "file_path": "/path/to/PaperName_Q2.png"}
+    ]
   },
   "failed_pairs": [{"qp_url": "...", "ms_url": "...", "reason": "..."}],
   "total_questions": <int>
