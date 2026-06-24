@@ -183,7 +183,6 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
     })
 
     pairs = json.loads(state.get("pairs_json", "[]"))
-    include_images = True
 
     all_rows = []
     all_diagram_map = {}
@@ -194,7 +193,6 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
         print(f"\n  Processing pair {i+1}/{len(pairs)}: {pair.get('qp_title', '?')}")
 
         message = (
-            f"include_images={include_images}\n"
             f"paper_number={i+1}\n\n"
             f"metadata={metadata}\n\n"
             f"{json.dumps([pair])}"
@@ -226,6 +224,16 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
             else:
                 diagram_map = diagram_maps.get(str(i + 1), parsed.get("diagram_map", {}))
 
+            # Direct question-number fallback: catches cases where Gemini tagged a
+            # diagram with figure_number only and left question_number empty, so
+            # the q: key was never added to diagram_map. We build a separate lookup
+            # keyed purely by question_number from the raw saved list.
+            _q_fallback = {
+                _norm_q(s["question_number"]): s["file_path"]
+                for s in raw_saved
+                if s.get("question_number") and s.get("file_path")
+            }
+
             for row in rows:
                 fig = _norm_q(str(row.get("figure_number") or ""))
                 tbl = _norm_q(str(row.get("table_number")  or ""))
@@ -234,6 +242,7 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
                     (diagram_map.get(f"fig:{fig}") if fig else None)
                     or (diagram_map.get(f"tbl:{tbl}") if tbl else None)
                     or (diagram_map.get(f"q:{q}")   if q   else None)
+                    or (_q_fallback.get(q)          if q   else None)
                     or ""
                 )
 
@@ -709,7 +718,6 @@ def _make_initial_state(qp_url, qp_meta, ms_url, ms_meta) -> AgentState:
         "ms_metadata_raw": ms_meta,
         "retry_count":     0,
         "status":          "ok",
-        "include_images":  True,
     }
 
 

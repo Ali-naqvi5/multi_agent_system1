@@ -85,6 +85,11 @@ export async function getPaper(id: number): Promise<PaperDetailOut> {
   return res.json();
 }
 
+export async function deletePaper(id: number): Promise<void> {
+  const res = await fetch(`${BASE}/api/papers/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text());
+}
+
 export function imageUrl(questionId: number): string {
   return `${BASE}/api/questions/${questionId}/image`;
 }

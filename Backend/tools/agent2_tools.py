@@ -380,13 +380,18 @@ DO NOT include it.
 Steps to extract each diagram:
 1. Record the page_index (0-based integer) of the page where the diagram appears.
    Each page was labelled [Page page_index=N] immediately after the image above.
-2a. Identify the question number the visual belongs to — look for the nearest question
-    label (e.g. "Question 1", "2(a)", "3b") printed above or beside the visual.
-    Use the label exactly as printed. If no question label is near the visual, use "".
-2b. Identify the figure number if the visual is a figure — look for "Figure N" printed
-    above or beside it. If it is not a figure, use "".
-2c. Identify the table number if the visual is a table — look for "Table N" printed
-    above or beside it. If it is not a table, use "".
+2a. REQUIRED — always populate question_number.
+    Find the nearest question label printed above, beside, or below the visual
+    (e.g. "Question 1", "2(a)", "3b", "Q4"). Return just the label as printed
+    (e.g. "3b", not "Question 3b"). If no label is directly adjacent, scan
+    the surrounding text to identify which question this diagram accompanies
+    and use that number. Only leave as "" if the diagram is genuinely a
+    standalone page illustration with absolutely no associated question.
+    This field is required even when figure_number or table_number is also set.
+2b. Identify the figure number if the visual is labelled "Figure N" — return "N".
+    If it is not a labelled figure, use "".
+2c. Identify the table number if the visual is labelled "Table N" — return "N".
+    If it is not a labelled table, use "".
 3. Return the bounding box of the diagram as [ymin, xmin, ymax, xmax] where each
    value is an integer normalized to 0-1000 relative to that page image's dimensions.
    - (0, 0) = top-left corner of the page image.

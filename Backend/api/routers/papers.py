@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from api.deps import get_db
 from api.schemas import AnswerOut, PaperDetailOut, PaperOut, QuestionOut
-from db.models import Image, Paper, Question
+from db.models import Answer, Image, Paper, Question
 
 router = APIRouter(prefix="/papers", tags=["papers"])
 
@@ -75,3 +75,22 @@ async def get_paper(paper_id: int, db: AsyncSession = Depends(get_db)) -> PaperD
         tier=paper.tier,
         questions=questions_out,
     )
+
+
+@router.delete("/{paper_id}", status_code=204)
+async def delete_paper(paper_id: int, db: AsyncSession = Depends(get_db)) -> None:
+    paper = await db.get(Paper, paper_id)
+    if paper is None:
+        raise HTTPException(status_code=404, detail="Paper not found")
+
+    # Fetch all question ids for this paper
+    q_result = await db.execute(select(Question.id).where(Question.paper_id == paper_id))
+    question_ids = q_result.scalars().all()
+
+    if question_ids:
+        await db.execute(delete(Image).where(Image.question_id.in_(question_ids)))
+        await db.execute(delete(Answer).where(Answer.question_id.in_(question_ids)))
+        await db.execute(delete(Question).where(Question.paper_id == paper_id))
+
+    await db.delete(paper)
+    await db.commit()

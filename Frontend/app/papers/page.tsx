@@ -1,7 +1,9 @@
-import Link from "next/link";
-import { listPapers } from "@/lib/api";
+"use client";
 
-export const dynamic = "force-dynamic";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { listPapers, deletePaper } from "@/lib/api";
+import type { PaperOut } from "@/lib/api";
 
 const BOARD_COLORS: Record<string, string> = {
   edexcel: "bg-blue-100 text-blue-700",
@@ -15,17 +17,54 @@ function boardColor(board: string | null): string {
   return BOARD_COLORS[(board ?? "").toLowerCase()] ?? "bg-slate-100 text-slate-600";
 }
 
-export default async function PapersPage() {
-  let papers;
-  try {
-    papers = await listPapers();
-  } catch {
+function TrashIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+    </svg>
+  );
+}
+
+export default function PapersPage() {
+  const [papers, setPapers]       = useState<PaperOut[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<number | null>(null);
+  const [deleting, setDeleting]   = useState<number | null>(null);
+
+  useEffect(() => {
+    listPapers()
+      .then(setPapers)
+      .catch(() => setError("Could not connect to the API server."))
+      .finally(() => setLoading(false));
+  }, []);
+
+  async function handleDelete(id: number) {
+    setDeleting(id);
+    setConfirmId(null);
+    try {
+      await deletePaper(id);
+      setPapers(prev => prev.filter(p => p.id !== id));
+    } catch {
+      setError("Failed to delete paper. Please try again.");
+    } finally {
+      setDeleting(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24 text-slate-400 text-sm gap-2">
+        <span className="w-4 h-4 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
+        Loading papers…
+      </div>
+    );
+  }
+
+  if (error) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-700 text-sm">
-        Could not connect to the API server. Make sure it is running on{" "}
-        <code className="font-mono bg-red-100 px-1 rounded">
-          {process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}
-        </code>
+        {error}
       </div>
     );
   }
@@ -66,9 +105,8 @@ export default async function PapersPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {papers.map((p) => (
-            <Link
+            <div
               key={p.id}
-              href={`/papers/${p.id}`}
               className="group bg-white border border-slate-200 rounded-2xl p-5 hover:shadow-md hover:border-blue-300 transition-all"
             >
               {/* Board badge + year */}
@@ -80,7 +118,7 @@ export default async function PapersPage() {
               </div>
 
               {/* Title */}
-              <p className="font-bold text-slate-800 group-hover:text-blue-600 leading-snug text-base transition-colors">
+              <p className="font-bold text-slate-800 leading-snug text-base">
                 {[p.level, p.subject].filter(Boolean).join(" · ") || "Untitled Paper"}
               </p>
 
@@ -98,9 +136,45 @@ export default async function PapersPage() {
                 <span className="text-xs text-slate-400">
                   {p.question_count} question{p.question_count !== 1 ? "s" : ""}
                 </span>
-                <span className="text-xs text-blue-500 font-medium group-hover:underline">View →</span>
+
+                <div className="flex items-center gap-2">
+                  {confirmId === p.id ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs text-slate-500">Delete?</span>
+                      <button
+                        onClick={() => handleDelete(p.id)}
+                        disabled={deleting === p.id}
+                        className="text-xs font-semibold text-white bg-red-500 hover:bg-red-600 disabled:bg-red-300 px-2 py-0.5 rounded-md transition-colors"
+                      >
+                        {deleting === p.id ? "…" : "Yes"}
+                      </button>
+                      <button
+                        onClick={() => setConfirmId(null)}
+                        className="text-xs font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded-md transition-colors"
+                      >
+                        No
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => setConfirmId(p.id)}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-all"
+                        title="Delete paper"
+                      >
+                        <TrashIcon />
+                      </button>
+                      <Link
+                        href={`/papers/${p.id}`}
+                        className="text-xs text-blue-500 font-medium hover:underline"
+                      >
+                        View →
+                      </Link>
+                    </>
+                  )}
+                </div>
               </div>
-            </Link>
+            </div>
           ))}
         </div>
       )}

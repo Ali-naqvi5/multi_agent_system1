@@ -1,11 +1,4 @@
-"""
-Thread-safe progress reporter.
 
-The FastAPI background thread sets a callback before calling run_pipeline_with_params().
-Pipeline nodes call report() to push message + percentage updates through that callback.
-Only one pipeline runs at a time in the current single-server deployment so a single
-module-level callback is safe.
-"""
 import threading
 
 _lock = threading.Lock()

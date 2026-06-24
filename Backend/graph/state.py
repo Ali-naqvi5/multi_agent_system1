@@ -4,7 +4,7 @@ AgentState — the LangGraph state schema.
 Every field is a plain JSON-serialisable type so agents can pass data as
 JSON strings and the graph can inspect / route on primitive values.
 """
-from typing import Optional
+from typing import Optional  # still used by error_message, paper_id
 from typing_extensions import TypedDict
 
 
@@ -27,10 +27,7 @@ class AgentState(TypedDict, total=False):
     # ── Agent 3 inputs ────────────────────────────────────────────────────────
     pairs_json: str          # JSON list of {qp_title, qp_url, ms_title, ms_url}
 
-    # ── Processing options ────────────────────────────────────────────────────
-    include_images: Optional[bool]
-
-    # ── Agent 3 outputs ───────────────────────────────────────────────────────
+    # ── Agent 2 outputs ───────────────────────────────────────────────────────
     extracted_rows_json: str
     diagram_map_json: str
 
