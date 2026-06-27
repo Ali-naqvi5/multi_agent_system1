@@ -1,6 +1,5 @@
 
 import asyncio
-import glob
 import json
 import os
 import re
@@ -588,8 +587,6 @@ def node_save_to_db(state: AgentState) -> AgentState:
         engine  = create_async_engine(db_url)
         Session = async_sessionmaker(engine, expire_on_commit=False)
 
-        crop_files: list[str] = []  # collect paths to delete after commit
-
         async with Session() as session:
             # One Paper row per pipeline run, built from state metadata
             paper_num_raw = state.get("paper_number", "")
@@ -645,7 +642,6 @@ def node_save_to_db(state: AgentState) -> AgentState:
                         )
                         img.question = q
                         session.add(img)
-                        crop_files.append(image_path)
                     except Exception as exc:
                         print(f"  Warning: could not read image {image_path}: {exc}")
 
@@ -655,13 +651,6 @@ def node_save_to_db(state: AgentState) -> AgentState:
 
         await engine.dispose()
 
-        # Delete cropped diagram files now that bytes are safely in the DB
-        for path in crop_files:
-            try:
-                os.remove(path)
-            except OSError:
-                pass
-
         return saved_paper_id
 
     paper_id = None
@@ -669,10 +658,17 @@ def node_save_to_db(state: AgentState) -> AgentState:
         paper_id = asyncio.run(_persist())
         print(f"\n  Saved {len(rows)} question(s) to database (paper_id={paper_id}).")
 
-        # Clean up rendered page PNG directories (intermediate vision files)
-        for d in glob.glob(os.path.join(TMP_DIR, "visual_*")):
-            shutil.rmtree(d, ignore_errors=True)
-        print("  Temporary image files cleaned up.")
+        # Wipe everything in TMP_DIR — JSONs, PNGs, subdirectories, all of it
+        for item in os.listdir(TMP_DIR):
+            item_path = os.path.join(TMP_DIR, item)
+            try:
+                if os.path.isfile(item_path):
+                    os.remove(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+            except OSError:
+                pass
+        print("  Temporary directory wiped.")
     except Exception as exc:
         print(f"\n  DB save failed: {exc}")
 

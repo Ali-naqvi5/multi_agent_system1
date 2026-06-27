@@ -86,7 +86,7 @@ def invoke_with_retry_slow(llm, *args, **kwargs):
     return llm.invoke(*args, **kwargs)  # final attempt — let it raise
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-TMP_DIR = "C:/tmp/past_papers"          # ← fixed for Windows
+TMP_DIR = os.environ.get("TMP_DIR", "C:/tmp/past_papers")
 os.makedirs(TMP_DIR, exist_ok=True)
 
 # ── Columns ──────────────────────────────────────────────────────────────────
