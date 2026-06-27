@@ -180,4 +180,3 @@ For a 50-question paper, approximate runtimes after optimisation:
 | Node 6 — verify | 50 batch calls (×5 parallel) | ~8 min |
 | **Total** | | **~25 min** |
 
-Previous sequential approach with the slow model took 3+ hours for the same paper.
