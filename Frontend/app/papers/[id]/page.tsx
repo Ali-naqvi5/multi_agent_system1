@@ -1,15 +1,38 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
 import Link from "next/link";
 import { getPaper } from "@/lib/api";
+import type { PaperDetailOut } from "@/lib/api";
 import { QuestionCard } from "@/components/QuestionCard";
 
-export const dynamic = "force-dynamic";
+export default function PaperPage() {
+  const params = useParams();
+  const id = Number(params.id);
 
-export default async function PaperPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
-  let paper;
-  try {
-    paper = await getPaper(Number(id));
-  } catch {
+  const [paper, setPaper]     = useState<PaperDetailOut | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(false);
+
+  useEffect(() => {
+    if (!id) return;
+    getPaper(id)
+      .then(setPaper)
+      .catch(() => setError(true))
+      .finally(() => setLoading(false));
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24 text-slate-400 text-sm gap-2">
+        <span className="w-4 h-4 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin" />
+        Loading paper…
+      </div>
+    );
+  }
+
+  if (error || !paper) {
     return (
       <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-red-700 text-sm">
         Paper not found or API server is unreachable.{" "}
