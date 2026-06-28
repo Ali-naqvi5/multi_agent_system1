@@ -27,7 +27,7 @@ export default function HomePage() {
     qp_url: "", qp_metadata_raw: "", ms_url: "", ms_metadata_raw: "",
   });
 
-  async function handleSubmit(e: React.SyntheticEvent) {
+  async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
     await start(form);
   }
