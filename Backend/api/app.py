@@ -17,7 +17,9 @@ async def _ensure_tables() -> None:
         return
     from sqlalchemy.ext.asyncio import create_async_engine
     from db.models import Base
-    engine = create_async_engine(db_url)
+    from api.deps import _prepare_url
+    clean_url, ssl_args = _prepare_url(db_url)
+    engine = create_async_engine(clean_url, connect_args=ssl_args)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await engine.dispose()
