@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "katex/dist/katex.min.css";
 import Link from "next/link";
+import { PipelineProvider } from "@/lib/pipeline-context";
 
 export const metadata: Metadata = {
   title: "ExamEval — Past Paper AI",
@@ -31,7 +32,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </nav>
           </div>
         </header>
-        <main className="max-w-6xl mx-auto px-6 py-10">{children}</main>
+        <main className="max-w-6xl mx-auto px-6 py-10">
+          <PipelineProvider>{children}</PipelineProvider>
+        </main>
       </body>
     </html>
   );

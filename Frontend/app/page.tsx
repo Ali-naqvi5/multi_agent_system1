@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { getJobStatus, runPipeline } from "@/lib/api";
+import { usePipeline } from "@/lib/pipeline-context";
 
 type Field = { label: string; key: keyof FormState; placeholder: string };
 
@@ -22,54 +22,14 @@ const FIELDS: Field[] = [
 
 export default function HomePage() {
   const router = useRouter();
+  const { phase, statusMsg, progress, paperId, start, reset } = usePipeline();
   const [form, setForm] = useState<FormState>({
     qp_url: "", qp_metadata_raw: "", ms_url: "", ms_metadata_raw: "",
   });
-  const [phase, setPhase] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [statusMsg, setStatusMsg] = useState("Starting pipeline…");
-  const [progress, setProgress] = useState(0);
-  const [paperId, setPaperId] = useState<number | null>(null);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: SubmitEvent) {
     e.preventDefault();
-    setPhase("running");
-    setStatusMsg("Starting pipeline…");
-    setProgress(0);
-
-    try {
-      const initial = await runPipeline(form);
-      const job_id = initial.job_id;
-      if (initial.message) setStatusMsg(initial.message);
-      if (initial.progress != null) setProgress(initial.progress);
-
-      const interval = setInterval(async () => {
-        try {
-          const status = await getJobStatus(job_id);
-          if (status.status === "done") {
-            clearInterval(interval);
-            setPaperId(status.paper_id ?? null);
-            setPhase("done");
-            setStatusMsg("Pipeline complete!");
-            setProgress(100);
-          } else if (status.status === "error") {
-            clearInterval(interval);
-            setPhase("error");
-            setStatusMsg(status.error ?? "Unknown error");
-            setProgress(0);
-          } else {
-            if (status.message) setStatusMsg(status.message);
-            if (status.progress != null) setProgress(status.progress);
-          }
-        } catch {
-          clearInterval(interval);
-          setPhase("error");
-          setStatusMsg("Lost connection to server.");
-        }
-      }, 5000);
-    } catch (err: unknown) {
-      setPhase("error");
-      setStatusMsg(err instanceof Error ? err.message : String(err));
-    }
+    await start(form);
   }
 
   return (
@@ -169,13 +129,21 @@ export default function HomePage() {
             </>
           )}
 
-          {/* CTA */}
+          {/* CTAs */}
           {phase === "done" && paperId && (
             <button
               onClick={() => router.push(`/papers/${paperId}`)}
               className="mt-4 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl py-2.5 text-sm transition-colors shadow-sm"
             >
               View Results →
+            </button>
+          )}
+          {(phase === "done" || phase === "error") && (
+            <button
+              onClick={reset}
+              className="mt-2 w-full text-sm text-slate-500 hover:text-slate-700 underline"
+            >
+              Run another pipeline
             </button>
           )}
         </div>
