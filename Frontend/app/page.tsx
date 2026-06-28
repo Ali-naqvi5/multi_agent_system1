@@ -27,7 +27,7 @@ export default function HomePage() {
     qp_url: "", qp_metadata_raw: "", ms_url: "", ms_metadata_raw: "",
   });
 
-  async function handleSubmit(e: SubmitEvent) {
+  async function handleSubmit(e: React.SyntheticEvent) {
     e.preventDefault();
     await start(form);
   }
@@ -127,6 +127,13 @@ export default function HomePage() {
                 <span className="font-semibold">{progress}%</span>
               </div>
             </>
+          )}
+
+          {/* Warning */}
+          {phase === "running" && (
+            <p className="mt-3 text-xs text-blue-600 bg-blue-100 rounded-lg px-3 py-2 text-center">
+              ⚠ Do not close or refresh this page while the pipeline is running.
+            </p>
           )}
 
           {/* CTAs */}
