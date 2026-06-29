@@ -8,7 +8,7 @@ import requests
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from config.settings import LLM_MODEL_FAST, LLM_MODEL_SMART, LLM_TEMPERATURE, TMP_DIR, invoke_with_retry, invoke_with_retry_slow, extract_text
+from config.settings import LLM_MODEL_FAST, LLM_MODEL_SMART, LLM_TEMPERATURE, get_run_dir, invoke_with_retry, invoke_with_retry_slow, extract_text
 
 
 _llm_fast = ChatGoogleGenerativeAI(
@@ -267,7 +267,7 @@ def scan_and_render_visual_pages(url: str, mode: str = "QP", paper_label: str = 
             tmp_path = tmp.name
 
         safe_paper = re.sub(r"[^a-zA-Z0-9_-]", "_", paper_label)[:60] if paper_label else re.sub(r"[^a-zA-Z0-9_-]", "_", url[-30:])
-        pages_dir  = os.path.join(TMP_DIR, f"visual_{mode}_{safe_paper}")
+        pages_dir  = os.path.join(get_run_dir(), f"visual_{mode}_{safe_paper}")
         os.makedirs(pages_dir, exist_ok=True)
 
         doc            = fitz.open(tmp_path)
@@ -494,7 +494,7 @@ def crop_and_save_diagrams(detections_json: str, paper_label: str = "", paper_nu
             detections = []
 
         safe_paper = re.sub(r"[^a-zA-Z0-9_-]", "_", paper_label)[:60] if paper_label else "paper"
-        paper_dir = os.path.join(TMP_DIR, safe_paper)
+        paper_dir = os.path.join(get_run_dir(), safe_paper)
 
         os.makedirs(paper_dir, exist_ok=True)
         saved      = []

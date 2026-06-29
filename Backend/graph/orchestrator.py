@@ -5,10 +5,11 @@ import os
 import re
 import shutil
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
-from config.settings import TMP_DIR
+from config.settings import TMP_DIR, set_run_dir, clear_run_dir
 from langgraph.graph import StateGraph, END
 from graph.state import AgentState
 from graph.progress import report as _progress, set_callback, clear_callback
@@ -276,11 +277,12 @@ def node_downloader_extractor(state: AgentState) -> AgentState:
             preview = q_text[:80] + ("..." if len(q_text) > 80 else "")
             print(f"    Q{q_num}: {preview}")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path  = os.path.join(TMP_DIR, f"extracted_{timestamp}.json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(all_rows, f, indent=2, ensure_ascii=False)
-        print(f"\n  Rows saved to: {out_path}")
+        # ── JSON snapshot (debug only) — disabled ──
+        # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # out_path  = os.path.join(TMP_DIR, f"extracted_{timestamp}.json")
+        # with open(out_path, "w", encoding="utf-8") as f:
+        #     json.dump(all_rows, f, indent=2, ensure_ascii=False)
+        # print(f"\n  Rows saved to: {out_path}")
 
     return {
         **state,
@@ -338,11 +340,12 @@ def node_generate_prompts(state: AgentState) -> AgentState:
     with ThreadPoolExecutor(max_workers=5) as ex:
         rows = list(ex.map(_gen_prompt, rows))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path  = os.path.join(TMP_DIR, f"extracted_with_prompts_{timestamp}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2, ensure_ascii=False)
-    print(f"\n  Enriched rows saved to: {out_path}")
+    # ── JSON snapshot (debug only) — disabled ──
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # out_path  = os.path.join(TMP_DIR, f"extracted_with_prompts_{timestamp}.json")
+    # with open(out_path, "w", encoding="utf-8") as f:
+    #     json.dump(rows, f, indent=2, ensure_ascii=False)
+    # print(f"\n  Enriched rows saved to: {out_path}")
 
     return {
         **state,
@@ -396,11 +399,12 @@ def node_generate_answers(state: AgentState) -> AgentState:
     with ThreadPoolExecutor(max_workers=5) as ex:
         rows = list(ex.map(_gen_answers, rows))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path  = os.path.join(TMP_DIR, f"extracted_with_answers_{timestamp}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2, ensure_ascii=False)
-    print(f"\n  Enriched rows saved to: {out_path}")
+    # ── JSON snapshot (debug only) — disabled ──
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # out_path  = os.path.join(TMP_DIR, f"extracted_with_answers_{timestamp}.json")
+    # with open(out_path, "w", encoding="utf-8") as f:
+    #     json.dump(rows, f, indent=2, ensure_ascii=False)
+    # print(f"\n  Enriched rows saved to: {out_path}")
 
     return {
         **state,
@@ -452,11 +456,12 @@ def node_evaluate_answers(state: AgentState) -> AgentState:
     with ThreadPoolExecutor(max_workers=5) as ex:
         rows = list(ex.map(_eval_row, rows))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path  = os.path.join(TMP_DIR, f"extracted_with_evaluations_{timestamp}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2, ensure_ascii=False)
-    print(f"\n  Enriched rows saved to: {out_path}")
+    # ── JSON snapshot (debug only) — disabled ──
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # out_path  = os.path.join(TMP_DIR, f"extracted_with_evaluations_{timestamp}.json")
+    # with open(out_path, "w", encoding="utf-8") as f:
+    #     json.dump(rows, f, indent=2, ensure_ascii=False)
+    # print(f"\n  Enriched rows saved to: {out_path}")
 
     return {
         **state,
@@ -547,11 +552,12 @@ def node_verify_and_refine(state: AgentState) -> AgentState:
     with ThreadPoolExecutor(max_workers=5) as ex:
         rows = list(ex.map(_verify_row, rows))
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path  = os.path.join(TMP_DIR, f"final_{timestamp}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2, ensure_ascii=False)
-    print(f"\n  Final rows saved to: {out_path}")
+    # ── JSON snapshot (debug only) — disabled ──
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # out_path  = os.path.join(TMP_DIR, f"final_{timestamp}.json")
+    # with open(out_path, "w", encoding="utf-8") as f:
+    #     json.dump(rows, f, indent=2, ensure_ascii=False)
+    # print(f"\n  Final rows saved to: {out_path}")
 
     return {
         **state,
@@ -657,18 +663,9 @@ def node_save_to_db(state: AgentState) -> AgentState:
     try:
         paper_id = asyncio.run(_persist())
         print(f"\n  Saved {len(rows)} question(s) to database (paper_id={paper_id}).")
-
-        # Wipe everything in TMP_DIR — JSONs, PNGs, subdirectories, all of it
-        for item in os.listdir(TMP_DIR):
-            item_path = os.path.join(TMP_DIR, item)
-            try:
-                if os.path.isfile(item_path):
-                    os.remove(item_path)
-                elif os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-            except OSError:
-                pass
-        print("  Temporary directory wiped.")
+        # Temp files for this run are removed by the runner's finally block —
+        # see run_pipeline_with_params / run_pipeline. This keeps cleanup scoped
+        # to the current run's folder so concurrent runs never delete each other.
     except Exception as exc:
         print(f"\n  DB save failed: {exc}")
 
@@ -730,8 +727,13 @@ def run_pipeline() -> None:
     print("  PIPELINE STARTED")
     print("█"*60)
 
-    for event in graph.stream(_make_initial_state(qp_url, qp_meta, ms_url, ms_meta), stream_mode="updates"):
-        _print_event(event)
+    run_dir = set_run_dir(os.path.join(TMP_DIR, f"run_{uuid.uuid4().hex[:12]}"))
+    try:
+        for event in graph.stream(_make_initial_state(qp_url, qp_meta, ms_url, ms_meta), stream_mode="updates"):
+            _print_event(event)
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        clear_run_dir()
 
     print("\n" + "█"*60)
     print("  PIPELINE COMPLETE")
@@ -767,6 +769,7 @@ def run_pipeline_with_params(
     print("  PIPELINE STARTED (API)")
     print("█"*60)
 
+    run_dir = set_run_dir(os.path.join(TMP_DIR, f"run_{uuid.uuid4().hex[:12]}"))
     accumulated: dict = {}
     try:
         for event in graph.stream(
@@ -783,6 +786,8 @@ def run_pipeline_with_params(
                     msg, pct = _NODE_PROGRESS[node_name]
                     _progress(msg, pct)
     finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+        clear_run_dir()
         if progress_cb:
             clear_callback()
 

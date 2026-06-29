@@ -4,6 +4,8 @@ Central configuration — all env vars and constants live here.
 import os
 import time
 import random
+import tempfile
+import threading
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -86,8 +88,32 @@ def invoke_with_retry_slow(llm, *args, **kwargs):
     return llm.invoke(*args, **kwargs)  # final attempt — let it raise
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-TMP_DIR = os.environ.get("TMP_DIR", "C:/tmp/past_papers")
+TMP_DIR = os.environ.get("TMP_DIR", os.path.join(tempfile.gettempdir(), "past_papers"))
 os.makedirs(TMP_DIR, exist_ok=True)
+
+# ── Per-run working directory ────────────────────────────────────────────────
+# Each pipeline run gets its own subfolder under TMP_DIR so that concurrent runs
+# (e.g. two users triggering a paper at the same time) never read or delete each
+# other's image files. Stored thread-local because the API runs every job in its
+# own thread, and all image I/O happens synchronously within that thread.
+_run_ctx = threading.local()
+
+
+def set_run_dir(path: str) -> str:
+    """Set this thread's pipeline working directory and ensure it exists."""
+    _run_ctx.dir = path
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_run_dir() -> str:
+    """Return this thread's working directory, falling back to TMP_DIR if unset."""
+    return getattr(_run_ctx, "dir", None) or TMP_DIR
+
+
+def clear_run_dir() -> None:
+    """Forget this thread's working directory (does not delete any files)."""
+    _run_ctx.dir = None
 
 # ── Columns ──────────────────────────────────────────────────────────────────
 HTML_COLUMNS = [

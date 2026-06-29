@@ -1,0 +1,27 @@
+# ── LangChain / LangGraph ────────────────────────────────────────────────────
+langchain==1.3.1
+langchain-core==1.4.0
+langchain-google-genai==4.2.4
+langchain-community==0.4.2
+langgraph==1.2.1
+
+# ── FastAPI ───────────────────────────────────────────────────────────────────
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+pydantic==2.13.4
+
+# ── Database ──────────────────────────────────────────────────────────────────
+sqlalchemy==2.0.49
+asyncpg==0.31.0
+
+# ── PDF / Vision ──────────────────────────────────────────────────────────────
+PyMuPDF==1.27.2.3
+Pillow==12.2.0
+
+# ── Google AI ─────────────────────────────────────────────────────────────────
+google-generativeai==0.8.6
+google-ai-generativelanguage==0.6.15
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.2.2
+requests==2.34.2
