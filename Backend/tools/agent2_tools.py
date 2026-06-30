@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 import requests
 from langchain_core.tools import tool
@@ -42,6 +43,33 @@ def _page_has_visuals(page) -> bool:
     return bool(page.get_images(full=False))
 
 
+def _download_pdf(url: str, retries: int = 3) -> bytes:
+    """Download a PDF's bytes with retry + timeout so a slow or flaky host
+    (e.g. Physics & Maths Tutor) doesn't kill the whole run.
+
+    Retries on read/connect timeouts, dropped connections, and 5xx responses
+    with exponential backoff; fails fast on 4xx (a genuinely bad URL).
+    Timeout is (15s connect, 120s read).
+    """
+    headers = {"User-Agent": "Mozilla/5.0"}
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=(15, 120))
+            resp.raise_for_status()
+            return resp.content
+        except requests.HTTPError as e:
+            # 4xx means the URL itself is wrong — retrying won't help.
+            if e.response is not None and 400 <= e.response.status_code < 500:
+                raise
+            last_err = e
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_err = e
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)  # 1s, 2s backoff between attempts
+    raise last_err  # type: ignore[misc]
+
+
 # =============================================================================
 # TEXT BRANCH
 # =============================================================================
@@ -58,9 +86,16 @@ def extract_pdf_text(url: str, mode: str = "QP") -> str:
     Returns JSON string:
         {"text": str, "pages": int, "mode": str, "error": str}
     """
+    tmp_path = None
     try:
         from langchain_community.document_loaders import PyPDFLoader
-        pages = PyPDFLoader(url).load()
+        # Download with retry/timeout, then load from a local file (more reliable
+        # than letting PyPDFLoader fetch the URL itself with no timeout control).
+        pdf_bytes = _download_pdf(url)
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        pages = PyPDFLoader(tmp_path).load()
         text  = "\n\n--- PAGE BREAK ---\n\n".join(
             p.page_content for p in pages if p.page_content
         )
@@ -72,6 +107,9 @@ def extract_pdf_text(url: str, mode: str = "QP") -> str:
         })
     except Exception as e:
         return json.dumps({"text": "", "pages": 0, "mode": mode, "error": str(e)})
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @tool
@@ -257,13 +295,10 @@ def scan_and_render_visual_pages(url: str, mode: str = "QP", paper_label: str = 
     try:
         import fitz  # PyMuPDF
 
-        # Download PDF
-        headers  = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=90)
-        response.raise_for_status()
-
+        # Download PDF (retry/timeout via shared helper)
+        pdf_bytes = _download_pdf(url)
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(response.content)
+            tmp.write(pdf_bytes)
             tmp_path = tmp.name
 
         safe_paper = re.sub(r"[^a-zA-Z0-9_-]", "_", paper_label)[:60] if paper_label else re.sub(r"[^a-zA-Z0-9_-]", "_", url[-30:])
