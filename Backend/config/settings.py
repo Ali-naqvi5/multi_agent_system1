@@ -10,9 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── API keys ────────────────────────────────────────────────────────────────
-OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-
 # ── LLM ─────────────────────────────────────────────────────────────────────
 # Fast model: 15 RPM free-tier, supports vision — used for agent reasoning + vision extraction
 LLM_MODEL_FAST  = "gemini-3.5-flash"
@@ -114,12 +111,4 @@ def get_run_dir() -> str:
 def clear_run_dir() -> None:
     """Forget this thread's working directory (does not delete any files)."""
     _run_ctx.dir = None
-
-# ── Columns ──────────────────────────────────────────────────────────────────
-HTML_COLUMNS = [
-    "paper", "board", "level", "subject",
-    "question_number", "question_text",
-    "marks", "answer", "mark_breakdown", "additional_guidance",
-    "diagram",                          # ← cropped diagram image column for HTML output
-]
 

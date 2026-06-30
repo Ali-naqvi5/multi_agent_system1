@@ -1,5 +1,15 @@
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+/** Error carrying the HTTP status so callers can distinguish 404 from a network failure. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = "ApiError";
+  }
+}
+
 export interface JobStatus {
   job_id: string;
   status: "running" | "done" | "error";
@@ -69,8 +79,17 @@ export async function runPipeline(body: {
 
 export async function getJobStatus(jobId: string): Promise<JobStatus> {
   const res = await fetch(`${BASE}/api/pipeline/status/${jobId}`);
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) throw new ApiError(res.status, await res.text());
   return res.json();
+}
+
+/** Best-effort cleanup of a finished job row. Errors are ignored (fire-and-forget). */
+export async function deleteJob(jobId: string): Promise<void> {
+  try {
+    await fetch(`${BASE}/api/pipeline/status/${jobId}`, { method: "DELETE" });
+  } catch {
+    /* cleanup is non-critical */
+  }
 }
 
 export async function listPapers(): Promise<PaperOut[]> {

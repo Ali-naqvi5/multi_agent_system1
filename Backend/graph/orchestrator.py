@@ -7,7 +7,6 @@ import shutil
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from typing import Any
 from config.settings import TMP_DIR, set_run_dir, clear_run_dir
 from langgraph.graph import StateGraph, END
@@ -18,7 +17,7 @@ from agents.agent1_query_parser import parse_metadata
 from agents.agent3_prompt_generator import generate_eval_prompt
 from agents.agent4_answer_generator import generate_answers
 from agents.agent5_evaluator import evaluate_answer, evaluate_all_answers
-from agents.agent6_verifier import verify_evaluation, verify_all_answers
+from agents.agent6_verifier import verify_all_answers
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,8 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePipeline } from "@/lib/pipeline-context";
+
+const FORM_KEY = "exameval_form";
 
 type Field = { label: string; key: keyof FormState; placeholder: string };
 
@@ -27,8 +29,17 @@ export default function HomePage() {
     qp_url: "", qp_metadata_raw: "", ms_url: "", ms_metadata_raw: "",
   });
 
+  // Rehydrate the form after a refresh so inputs aren't lost mid-run.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(FORM_KEY);
+      if (saved) setForm(JSON.parse(saved));
+    } catch { /* ignore malformed storage */ }
+  }, []);
+
   async function handleSubmit(e: { preventDefault(): void }) {
     e.preventDefault();
+    try { localStorage.setItem(FORM_KEY, JSON.stringify(form)); } catch { /* ignore */ }
     await start(form);
   }
 

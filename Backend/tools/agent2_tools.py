@@ -78,7 +78,7 @@ def extract_pdf_text(url: str, mode: str = "QP") -> str:
 def merge_qp_ms_rows(qp_data: str, ms_data: str, metadata: str) -> str:
     """
     Uses Gemini to match question paper text with mark scheme text and produce
-    structured rows ready for Google Sheets output.
+    structured rows ready for downstream grading.
 
     Args:
         qp_data:  Plain text extracted from the question paper PDF.
