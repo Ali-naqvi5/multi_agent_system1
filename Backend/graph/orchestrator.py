@@ -589,7 +589,9 @@ def node_save_to_db(state: AgentState) -> AgentState:
         return {**state, "status": "done"}
 
     async def _persist():
-        engine  = create_async_engine(db_url)
+        from api.deps import _prepare_url
+        clean_url, ssl_args = _prepare_url(db_url)  # strip sslmode= (asyncpg rejects it)
+        engine  = create_async_engine(clean_url, connect_args=ssl_args, pool_pre_ping=True)
         Session = async_sessionmaker(engine, expire_on_commit=False)
 
         async with Session() as session:

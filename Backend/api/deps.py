@@ -22,7 +22,12 @@ def _session_factory():
         if not db_url:
             raise RuntimeError("DATABASE_URL is not set")
         clean_url, connect_args = _prepare_url(db_url)
-        _engine = create_async_engine(clean_url, connect_args=connect_args)
+        _engine = create_async_engine(
+            clean_url,
+            connect_args=connect_args,
+            pool_pre_ping=True,   # revive stale Neon connections dropped while idle
+            pool_recycle=300,     # recycle connections older than 5 min
+        )
         _Session = async_sessionmaker(_engine, expire_on_commit=False)
     return _Session
 
